@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>课堂答案实时聚集 · 投屏版</title>
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<style>
+  :root {
+    --bg: #05080f;
+    --panel: #101725;
+    --border: rgba(70, 115, 180, 0.28);
+    --text: #e6edf3;
+    --muted: #8b9cb3;
+    --accent: #7cc4ff;
+    --accent-glow: rgba(124, 196, 255, 0.18);
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ===== 顶部栏 ===== */
+  .topbar {
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    background: rgba(7, 12, 22, 0.94);
+    border-bottom: 1px solid rgba(60, 100, 160, 0.20);
+    flex-shrink: 0;
+    z-index: 10;
+    position: relative;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 14px; }
+  .brand { font-size: 15px; font-weight: 600; letter-spacing: 0.5px; color: var(--text); }
+  .brand span { color: var(--accent); }
+  .room-badge {
+    font-family: "SF Mono", Consolas, monospace;
+    background: rgba(20, 36, 60, 0.85);
+    border: 1px solid rgba(80, 140, 210, 0.30);
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #8ecbff;
+    letter-spacing: 1px;
+  }
+  .conn-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #484f58; flex-shrink: 0; }
+  .dot.online { background: var(--ok); box-shadow: 0 0 6px rgba(63, 185, 80, 0.5); }
+  .dot.offline { background: var(--err); }
+  .dot.connecting { background: var(--warn); animation: connPulse 1s infinite; }
+  @keyframes connPulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+  /* ===== 舞台：深色星空 ===== */
+  #stage {
+    position: relative;
+    width: 100%;
+    height: calc(100vh - 52px);
+    overflow: hidden;
+    background:
+      radial-gradient(ellipse 72% 58% at 50% 40%, rgba(60, 105, 170, 0.09), transparent 62%),
+      radial-gradient(ellipse 130% 110% at 50% 55%, #081020 0%, #05080f 55%, #02040a 100%);
+  }
+
+  /* 缓慢漂移的星云光 */
+  #nebula {
+    position: absolute;
+    inset: -25%;
+    background:
+      radial-gradient(ellipse 38% 32% at 28% 22%, rgba(70, 120, 210, 0.10), transparent 60%),
+      radial-gradient(ellipse 34% 28% at 76% 68%, rgba(110, 90, 200, 0.09), transparent 60%),
+      radial-gradient(ellipse 30% 26% at 60% 15%, rgba(60, 160, 200, 0.06), transparent 60%);
+    animation: nebulaDrift 34s ease-in-out infinite alternate;
+    pointer-events: none;
+    z-index: 1;
+    will-change: transform, opacity;
+  }
+  @keyframes nebulaDrift {
+    0%   { transform: translate3d(-1.5%, -1%, 0) scale(1.02); opacity: 0.85; }
+    100% { transform: translate3d(1.5%, 1.5%, 0) scale(1.10); opacity: 1; }
+  }
+
+  /* 动态星点画布 */
+  #starfield {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  #cloud {
+    position: absolute;
+    inset: 0;
+    padding: 40px 60px;
+    z-index: 3;
+  }
+
+  /* ===== 答案：深冰蓝月光色系，按热度调节明暗 ===== */
+  .answer {
+    position: absolute;
+    white-space: nowrap;
+    font-weight: 500;
+    line-height: 1.12;
+    letter-spacing: 0.02em;
+    user-select: none;
+    pointer-events: none;
+    will-change: left, top, font-size, opacity, transform, filter;
+    transition:
+      left 0.72s cubic-bezier(0.22, 1, 0.36, 1),
+      top 0.72s cubic-bezier(0.22, 1, 0.36, 1),
+      font-size 0.72s cubic-bezier(0.22, 1, 0.36, 1),
+      color 0.72s ease,
+      text-shadow 0.72s ease,
+      opacity 0.55s ease,
+      transform 0.55s cubic-bezier(0.34, 1.56, 0.64, 1),
+      filter 0.55s ease;
+  }
+  .answer.pop {
+    animation: answerPop 0.62s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @keyframes answerPop {
+    0%   { transform: scale(1); }
+    45%  { transform: scale(1.1); }
+    100% { transform: scale(1); }
+  }
+
+  /* ===== 空状态 ===== */
+  .empty-hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    gap: 12px;
+    pointer-events: none;
+    transition: opacity 0.4s;
+    z-index: 4;
+  }
+  .empty-hint.hidden { opacity: 0; }
+  .empty-hint .icon { font-size: 48px; opacity: 0.35; }
+  .empty-hint .title { font-size: 18px; font-weight: 500; color: #c9d1d9; }
+  .empty-hint .sub { font-size: 13px; }
+
+  /* ===== 底部统计栏 ===== */
+  .statusbar {
+    position: absolute;
+    left: 20px;
+    bottom: 16px;
+    display: flex;
+    gap: 8px;
+    z-index: 10;
+  }
+  .stat-pill {
+    background: rgba(7, 13, 25, 0.78);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(70, 120, 190, 0.22);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .stat-pill b { color: var(--text); font-weight: 600; font-size: 14px; }
+
+  /* ===== 教师控制面板 ===== */
+  .teacher-controls {
+    position: absolute;
+    right: 20px;
+    top: 68px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 10;
+  }
+  .ctrl-btn {
+    background: rgba(9, 16, 30, 0.82);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(80, 130, 200, 0.22);
+    color: var(--muted);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: left;
+    font-family: inherit;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ctrl-btn:hover { border-color: rgba(120, 180, 255, 0.6); color: #dbeaff; }
+  .ctrl-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+
+  /* ===== 模态 ===== */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 5, 12, 0.74);
+    backdrop-filter: blur(4px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 20px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    width: 100%;
+    max-width: 440px;
+    max-height: 88vh;
+    overflow-y: auto;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  }
+  .modal-card h2 { font-size: 19px; margin-bottom: 8px; font-weight: 600; }
+  .modal-card .desc { font-size: 13px; color: var(--muted); margin-bottom: 18px; line-height: 1.6; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .field input {
+    width: 100%;
+    background: #070c16;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 11px 14px;
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.2s;
+    font-family: inherit;
+  }
+  .field input:focus { border-color: var(--accent); }
+  .field input.big { font-size: 18px; padding: 14px 16px; }
+  .btn-primary {
+    width: 100%;
+    background: var(--accent);
+    color: #06101d;
+    border: none;
+    border-radius: 8px;
+    padding: 13px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s;
+    font-family: inherit;
+  }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-primary:active { transform: scale(0.985); }
+  .btn-primary.ok { background: var(--ok); color: #04140a; }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 8px;
+    padding: 11px;
+    font-size: 13px;
+    cursor: pointer;
+    width: 100%;
+    margin-top: 10px;
+    font-family: inherit;
+  }
+  .btn-ghost:hover { border-color: var(--text); color: var(--text); }
+
+  /* 学生端状态条 */
+  .s-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 16px;
+    padding: 8px 12px;
+    background: #070c16;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .s-hint {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.6;
+    margin-top: 14px;
+    text-align: center;
+  }
+
+  /* 提示条 */
+  .toast {
+    position: fixed;
+    bottom: 28px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: #14203a;
+    border: 1px solid rgba(80, 130, 200, 0.35);
+    color: var(--text);
+    padding: 10px 22px;
+    border-radius: 10px;
+    font-size: 13px;
+    opacity: 0;
+    transition: all 0.3s;
+    pointer-events: none;
+    z-index: 200;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ===== 学生模式：隐藏教师端 UI ===== */
+  body.student-mode .topbar,
+  body.student-mode #stage { display: none; }
+  body.student-mode .modal-overlay { background: var(--bg); backdrop-filter: none; }
+  body.student-mode .modal-card {
+    border-color: transparent;
+    box-shadow: none;
+    background: transparent;
+  }
+
+  @media (max-width: 640px) {
+    #cloud { padding: 24px 20px; }
+    .topbar { padding: 0 12px; }
+    .brand { font-size: 13px; }
+    .teacher-controls { right: 12px; top: 62px; }
+    .statusbar { left: 12px; bottom: 12px; }
+    .modal-overlay { align-items: flex-start; padding-top: 6vh; }
+    .modal-card { padding: 22px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== 顶部栏 ==================== -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="brand">课堂答案<span>聚集</span></div>
+    <div class="room-badge" id="roomBadge">—</div>
+    <div class="conn-status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">初始化中</span>
+    </div>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <button class="ctrl-btn" id="btnStudent" style="padding:7px 12px;">📱 学生入口</button>
+    <button class="ctrl-btn" id="btnNewRoom" style="padding:7px 12px;">🔄 新房间</button>
+  </div>
+</div>
+
+<!-- ==================== 舞台（动态星空） ==================== -->
+<div id="stage">
+  <div id="nebula"></div>
+  <canvas id="starfield"></canvas>
+  <div id="cloud"></div>
+
+  <div class="empty-hint" id="emptyHint">
+    <div class="icon">✏️</div>
+    <div class="title">等待学生提交答案…</div>
+    <div class="sub">学生扫码或点开链接即可直接作答</div>
+  </div>
+
+  <div class="teacher-controls" id="teacherControls" style="display:none;">
+    <button class="ctrl-btn" id="btnSort">📊 按热度排序</button>
+    <button class="ctrl-btn" id="btnRecenter">🎯 重新布局</button>
+    <button class="ctrl-btn" id="btnExport">📋 导出答案</button>
+    <button class="ctrl-btn" id="btnClear">🗑 清空重来</button>
+  </div>
+
+  <div class="statusbar">
+    <div class="stat-pill">提交 <b id="statTotal">0</b> 条</div>
+    <div class="stat-pill">独立答案 <b id="statUnique">0</b> 种</div>
+    <div class="stat-pill">已连接 <b id="statPeers">0</b> 人</div>
+  </div>
+</div>
+
+<!-- ==================== 模态 ==================== -->
+<div class="modal-overlay" id="studentModal">
+  <div class="modal-card" id="studentCard"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ================================================================
+ * 课堂答案实时聚集工具
+ * 教师端：PeerJS 建房，接收答案，加权词云渲染
+ * 学生端：点开链接立即作答；连接在后台进行，答案可先缓存
+ * ================================================================ */
+
+const CONFIG = {
+  minFontSize: 16,
+  maxFontSize: 96,
+  padding: 10,
+  spiralStep: 4,
+  maxPlacementAttempts: 600,
+};
+
+const state = {
+  peer: null,
+  isTeacher: false,
+  roomId: '',
+  connections: new Map(),
+  answers: [],
+  answerMap: new Map(),
+  resizeTimer: null,
+  sortByHeat: false,
+  myPeerId: null,
+};
+
+const studentState = {
+  peer: null,
+  conn: null,
+  roomId: '',
+  status: 'idle',
+  pending: [],
+};
+
+const $ = (s) => document.querySelector(s);
+const cloudEl = $('#cloud');
+const emptyHint = $('#emptyHint');
+const roomBadge = $('#roomBadge');
+const statusDot = $('#statusDot');
+const statusText = $('#statusText');
+const statTotal = $('#statTotal');
+const statUnique = $('#statUnique');
+const statPeers = $('#statPeers');
+const teacherControls = $('#teacherControls');
+const studentModal = $('#studentModal');
+const studentCard = $('#studentCard');
+const toastEl = $('#toast');
+
+/* ---------------- 工具 ---------------- */
+function normalize(text) {
+  return String(text).trim().replace(/\s+/g, ' ').slice(0, 60);
+}
+function hashText(text) {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) - h + text.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+function toast(msg, duration = 2000) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => toastEl.classList.remove('show'), duration);
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* ================================================================
+ * 一、动态星空
+ * ================================================================ */
+function initStarfield() {
+  const canvas = document.getElementById('starfield');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+
+  let stars = [];
+  let meteors = [];
+  let w = 0, h = 0;
+  let rafId = null;
+  let lastTs = 0;
+  let meteorCooldown = 120;
+
+  /* 预渲染三种色相的光晕贴图，drawImage 复用，避免每帧创建渐变 */
+  function makeGlowSprite(hue) {
+    const size = 64;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grad.addColorStop(0, `hsla(${hue}, 85%, 94%, 1)`);
+    grad.addColorStop(0.35, `hsla(${hue}, 80%, 88%, 0.35)`);
+    grad.addColorStop(1, `hsla(${hue}, 80%, 88%, 0)`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+    return c;
+  }
+  const sprites = {
+    200: makeGlowSprite(200),
+    210: makeGlowSprite(210),
+    45: makeGlowSprite(45),
+  };
+
+  function build() {
+    const rect = canvas.getBoundingClientRect();
+    w = Math.max(1, Math.floor(rect.width));
+    h = Math.max(1, Math.floor(rect.height));
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const count = Math.max(120, Math.min(380, Math.floor(w * h / 4600)));
+    stars = [];
+
+    for (let i = 0; i < count; i++) {
+      const big = Math.random() < 0.055;
+      const hueRoll = Math.random();
+      const hue = hueRoll < 0.18 ? 210 : (hueRoll < 0.6 ? 200 : 45);
+
+      stars.push({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        r: big ? 0.9 + Math.random() * 1.0 : 0.32 + Math.random() * 0.6,
+        baseA: big ? 0.48 + Math.random() * 0.35 : 0.10 + Math.random() * 0.38,
+        hue,
+        big,
+        vx: (Math.random() - 0.5) * 0.025,
+        vy: (Math.random() - 0.5) * 0.025,
+        phase: Math.random() * Math.PI * 2,
+        twinkleSpeed: 0.5 + Math.random() * 1.8,
+      });
+    }
+  }
+
+  function spawnMeteor() {
+    const fromLeft = Math.random() < 0.65;
+    const angle = fromLeft
+      ? Math.PI / 4 + (Math.random() - 0.5) * 0.35
+      : Math.PI * 3 / 4 + (Math.random() - 0.5) * 0.35;
+    const speed = 7 + Math.random() * 5;
+
+    meteors.push({
+      x: fromLeft ? -60 - Math.random() * 100 : w + 60 + Math.random() * 100,
+      y: Math.random() * h * 0.4,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 0,
+      maxLife: 100 + Math.random() * 60,
+      length: 90 + Math.random() * 110,
+    });
+  }
+
+  function draw(ts) {
+    const dt = lastTs ? Math.min((ts - lastTs) / 16.67, 3) : 1;
+    lastTs = ts;
+
+    ctx.clearRect(0, 0, w, h);
+
+    /* ---- 星点：漂移 + 闪烁 ---- */
+    for (const s of stars) {
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      if (s.x < -10) s.x = w + 10;
+      if (s.x > w + 10) s.x = -10;
+      if (s.y < -10) s.y = h + 10;
+      if (s.y > h + 10) s.y = -10;
+
+      s.phase += s.twinkleSpeed * dt * 0.018;
+      const twinkle = 0.65 + 0.35 * Math.sin(s.phase);
+      const a = s.baseA * twinkle;
+
+      if (s.big) {
+        const size = s.r * 14;
+        ctx.globalAlpha = a * 0.55;
+        ctx.drawImage(sprites[s.hue] || sprites[200], s.x - size / 2, s.y - size / 2, size, size);
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.fillStyle = `hsla(${s.hue}, 55%, 92%, ${a})`;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    /* ---- 流星 ---- */
+    meteorCooldown -= dt;
+    if (meteorCooldown <= 0 && meteors.length < 2) {
+      spawnMeteor();
+      meteorCooldown = 220 + Math.random() * 320;
+    }
+
+    for (let i = meteors.length - 1; i >= 0; i--) {
+      const m = meteors[i];
+      m.x += m.vx * dt;
+      m.y += m.vy * dt;
+      m.life += dt;
+
+      const progress = m.life / m.maxLife;
+      if (progress >= 1 || m.x < -200 || m.x > w + 200 || m.y > h + 200) {
+        meteors.splice(i, 1);
+        continue;
+      }
+
+      const alpha = Math.sin(progress * Math.PI) * 0.9;
+      const speed = Math.hypot(m.vx, m.vy);
+      const tailX = m.x - (m.vx / speed) * m.length;
+      const tailY = m.y - (m.vy / speed) * m.length;
+
+      const grad = ctx.createLinearGradient(m.x, m.y, tailX, tailY);
+      grad.addColorStop(0, `hsla(200, 90%, 92%, ${alpha})`);
+      grad.addColorStop(0.5, `hsla(205, 85%, 85%, ${alpha * 0.4})`);
+      grad.addColorStop(1, `hsla(205, 85%, 85%, 0)`);
+
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 1.7;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(m.x, m.y);
+      ctx.lineTo(tailX, tailY);
+      ctx.stroke();
+
+      ctx.fillStyle = `hsla(200, 100%, 96%, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    rafId = requestAnimationFrame(draw);
+  }
+
+  build();
+  rafId = requestAnimationFrame(draw);
+
+  let resizeT = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(build, 300);
+  });
+
+  /* 页面不可见时暂停动画，省电省资源 */
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+    } else if (!rafId) {
+      lastTs = 0;
+      rafId = requestAnimationFrame(draw);
+    }
+  });
+}
+
+/* ================================================================
+ * 二、统一配色：加深的冰蓝月光色系
+ * ================================================================ */
+function answerColor(count, minCount, maxCount) {
+  const ratio = maxCount === minCount ? 1 : (count - minCount) / (maxCount - minCount);
+  const hue = 206;
+  const sat = 30 + ratio * 50;      // 30% ~ 80%
+  const light = 40 + ratio * 36;    // 40% ~ 76%（整体比之前更深）
+  return `hsl(${hue}, ${sat.toFixed(1)}%, ${light.toFixed(1)}%)`;
+}
+
+/* ================================================================
+ * 三、答案数据层
+ * ================================================================ */
+function addOrUpdateAnswer(rawText) {
+  const text = normalize(rawText);
+  if (!text) return;
+
+  const key = text.toLowerCase();
+  let item = state.answerMap.get(key);
+
+  if (item) {
+    item.count += 1;
+    item.lastAt = Date.now();
+  } else {
+    item = {
+      id: 'a_' + hashText(key) + '_' + Date.now().toString(36),
+      text,
+      count: 1,
+      firstAt: Date.now(),
+      lastAt: Date.now(),
+    };
+    state.answerMap.set(key, item);
+    state.answers.push(item);
+  }
+
+  updateStats();
+  scheduleRender();
+}
+
+function getSortedAnswers() {
+  return [...state.answers].sort((a, b) => b.count - a.count || a.firstAt - b.firstAt);
+}
+
+function updateStats() {
+  const total = state.answers.reduce((s, a) => s + a.count, 0);
+  statTotal.textContent = total;
+  statUnique.textContent = state.answers.length;
+  statPeers.textContent = state.isTeacher ? state.connections.size : 0;
+  emptyHint.classList.toggle('hidden', state.answers.length > 0);
+}
+
+/* ================================================================
+ * 四、词云布局与动态渲染
+ * ================================================================ */
+const domMap = new Map();
+const measureCache = new Map();
+let renderScheduled = false;
+
+function scheduleRender() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    renderCloud();
+  });
+}
+
+function computeFontSizes(items) {
+  const sizeMap = new Map();
+  if (items.length === 0) return sizeMap;
+
+  const counts = items.map(i => i.count);
+  const maxCount = Math.max(...counts);
+  const minCount = Math.min(...counts);
+
+  for (const item of items) {
+    let size;
+    if (maxCount === minCount) {
+      size = CONFIG.maxFontSize * 0.74;
+    } else {
+      const ratio = (item.count - minCount) / (maxCount - minCount);
+      const compressed = Math.log1p(ratio * 9) / Math.log(10);
+      size = CONFIG.minFontSize + compressed * (CONFIG.maxFontSize - CONFIG.minFontSize);
+    }
+    sizeMap.set(item.id, Math.round(size));
+  }
+  return sizeMap;
+}
+
+function measureText(text, fontSize) {
+  const key = fontSize + '|' + text;
+  if (measureCache.has(key)) return measureCache.get(key);
+
+  const span = document.createElement('span');
+  span.textContent = text;
+  span.style.cssText = `
+    position:absolute; visibility:hidden; white-space:nowrap;
+    font-size:${fontSize}px; font-weight:500; letter-spacing:0.02em;
+    font-family:inherit;
+  `;
+  document.body.appendChild(span);
+  const rect = span.getBoundingClientRect();
+  document.body.removeChild(span);
+
+  const result = { w: Math.ceil(rect.width), h: Math.ceil(rect.height) };
+  if (measureCache.size > 3000) measureCache.clear();
+  measureCache.set(key, result);
+  return result;
+}
+
+function intersects(a, b, pad) {
+  return !(
+    a.x + a.w + pad < b.x ||
+    b.x + b.w + pad < a.x ||
+    a.y + a.h + pad < b.y ||
+    b.y + b.h + pad < a.y
+  );
+}
+
+function findPlacement(w, h, containerW, containerH, placed) {
+  const cx = containerW / 2;
+  const cy = containerH / 2;
+  const pad = CONFIG.padding;
+
+  let scale = 1;
+  if (w > containerW - 40 || h > containerH - 40) {
+    scale = Math.min((containerW - 40) / w, (containerH - 40) / h);
+    w = Math.floor(w * scale);
+    h = Math.floor(h * scale);
+  }
+
+  const maxR = Math.sqrt(cx * cx + cy * cy);
+  let angle = Math.random() * Math.PI * 2;
+  let radius = 0;
+
+  for (let i = 0; i < CONFIG.maxPlacementAttempts; i++) {
+    const x = cx + radius * Math.cos(angle) - w / 2;
+    const y = cy + radius * Math.sin(angle) - h / 2;
+
+    if (x >= 10 && y >= 10 && x + w <= containerW - 10 && y + h <= containerH - 10) {
+      const candidate = { x, y, w, h };
+      let ok = true;
+      for (const p of placed) {
+        if (intersects(candidate, p, pad)) { ok = false; break; }
+      }
+      if (ok) return { x, y, w, h, scale };
+    }
+
+    angle += 0.35;
+    radius += CONFIG.spiralStep;
+    if (radius > maxR) break;
+  }
+  return null;
+}
+
+function triggerPulse(el) {
+  el.classList.remove('pop');
+  void el.offsetWidth;
+  el.classList.add('pop');
+  clearTimeout(el._popT);
+  el._popT = setTimeout(() => el.classList.remove('pop'), 680);
+}
+
+function renderCloud() {
+  const container = cloudEl;
+  const rect = container.getBoundingClientRect();
+  const containerW = rect.width;
+  const containerH = rect.height;
+  if (containerW < 50 || containerH < 50) return;
+
+  const items = getSortedAnswers();
+  if (items.length === 0) {
+    container.innerHTML = '';
+    domMap.clear();
+    emptyHint.classList.remove('hidden');
+    return;
+  }
+  emptyHint.classList.add('hidden');
+
+  const sizeMap = computeFontSizes(items);
+  const counts = items.map(i => i.count);
+  const maxCount = Math.max(...counts);
+  const minCount = Math.min(...counts);
+
+  const sorted = [...items].sort((a, b) => (sizeMap.get(b.id) || 0) - (sizeMap.get(a.id) || 0));
+  const placed = [];
+
+  for (const item of sorted) {
+    let fontSize = sizeMap.get(item.id) || CONFIG.minFontSize;
+    let measured = measureText(item.text, fontSize);
+    let placement = findPlacement(measured.w, measured.h, containerW, containerH, placed);
+
+    let shrink = 0;
+    while (!placement && fontSize > CONFIG.minFontSize && shrink < 8) {
+      fontSize = Math.max(CONFIG.minFontSize, Math.floor(fontSize * 0.82));
+      measured = measureText(item.text, fontSize);
+      placement = findPlacement(measured.w, measured.h, containerW, containerH, placed);
+      shrink++;
+    }
+
+    if (!placement) {
+      fontSize = CONFIG.minFontSize;
+      measured = measureText(item.text, fontSize);
+      let fallbackY = containerH - 40;
+      for (const p of placed) {
+        if (Math.abs(p.y - fallbackY) < 30) fallbackY -= 30;
+      }
+      placement = {
+        x: 20,
+        y: Math.max(10, fallbackY - measured.h),
+        w: measured.w,
+        h: measured.h,
+        scale: 1,
+      };
+    }
+
+    const finalFontSize = Math.max(10, Math.floor(fontSize * (placement.scale || 1)));
+    placed.push({ x: placement.x, y: placement.y, w: placement.w, h: placement.h });
+
+    const color = answerColor(item.count, minCount, maxCount);
+
+    /* 光晕：配合加深的色系，亮星仍有柔和蓝光 */
+    let shadow = 'none';
+    if (maxCount >= 2) {
+      if (item.count === maxCount) {
+        shadow = '0 0 26px hsla(206, 85%, 74%, 0.36), 0 0 64px hsla(206, 85%, 74%, 0.13)';
+      } else if (item.count >= maxCount * 0.55) {
+        shadow = '0 0 18px hsla(206, 82%, 70%, 0.16)';
+      }
+    }
+
+    let el = domMap.get(item.id);
+
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'answer';
+      el.dataset.id = item.id;
+      el.textContent = item.text;
+
+      el.style.left = placement.x + 'px';
+      el.style.top = placement.y + 'px';
+      el.style.fontSize = finalFontSize + 'px';
+      el.style.color = color;
+      el.style.textShadow = shadow;
+      el.style.opacity = '0';
+      el.style.transform = 'scale(0.55) translateY(10px)';
+      el.style.filter = 'blur(6px)';
+
+      container.appendChild(el);
+      domMap.set(item.id, el);
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          el.style.opacity = '1';
+          el.style.transform = 'scale(1) translateY(0)';
+          el.style.filter = 'blur(0px)';
+        });
+      });
+    } else {
+      const prevCount = Number(el.dataset.count || 0);
+
+      el.style.left = placement.x + 'px';
+      el.style.top = placement.y + 'px';
+      el.style.fontSize = finalFontSize + 'px';
+      el.style.color = color;
+      el.style.textShadow = shadow;
+
+      if (prevCount > 0 && item.count > prevCount) {
+        triggerPulse(el);
+      }
+    }
+
+    el.dataset.count = item.count;
+  }
+}
+
+/* ================================================================
+ * 五、教师端：PeerJS 建房
+ * ================================================================ */
+async function initTeacher() {
+  state.isTeacher = true;
+  teacherControls.style.display = 'flex';
+
+  const peer = new Peer(undefined, {
+    debug: 0,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ],
+    },
+  });
+  state.peer = peer;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      statusDot.className = 'dot offline';
+      statusText.textContent = '连接超时';
+      reject(new Error('PeerJS open timeout'));
+    }, 15000);
+
+    peer.on('open', (id) => {
+      clearTimeout(timer);
+      state.myPeerId = id;
+      state.roomId = id.slice(-4).toUpperCase();
+      roomBadge.textContent = state.roomId;
+      statusDot.className = 'dot online';
+      statusText.textContent = '房间已创建';
+      updateStats();
+      resolve(id);
+    });
+
+    peer.on('error', (err) => {
+      clearTimeout(timer);
+      statusDot.className = 'dot offline';
+      statusText.textContent = '连接错误';
+      console.error('[PeerJS teacher]', err);
+      reject(err);
+    });
+
+    peer.on('connection', (conn) => {
+      state.connections.set(conn.peer, conn);
+      updateStats();
+
+      conn.on('open', () => {
+        conn.send({ type: 'room_ok', room: state.roomId });
+      });
+
+      conn.on('data', (data) => {
+        if (data && data.type === 'answer' && typeof data.text === 'string') {
+          addOrUpdateAnswer(data.text);
+          try { conn.send({ type: 'ack', ok: true }); } catch (e) {}
+        }
+      });
+
+      conn.on('close', () => {
+        state.connections.delete(conn.peer);
+        updateStats();
+      });
+
+      conn.on('error', () => {
+        state.connections.delete(conn.peer);
+        updateStats();
+      });
+    });
+  });
+}
+
+/* ================================================================
+ * 六、学生端
+ * ================================================================ */
+function renderStudentAnswer() {
+  studentCard.innerHTML = `
+    <div class="s-head">
+      <span class="dot connecting" id="sDot"></span>
+      <span id="sStatus">正在连接课堂…</span>
+    </div>
+    <h2>提交你的答案</h2>
+    <p class="desc">输入后按回车或点击提交。相同答案会自动合并，越集中字号越大。</p>
+    <div class="field">
+      <input type="text" id="sInput" class="big" maxlength="60"
+             placeholder="输入你的答案…" autocomplete="off" autocapitalize="off">
+    </div>
+    <button class="btn-primary" id="sSubmit">提交答案</button>
+    <p class="s-hint">连接尚未完成时也可以先输入，提交后会自动排队发送</p>
+  `;
+
+  const input = $('#sInput');
+  const btn = $('#sSubmit');
+
+  const submit = () => studentSubmit();
+  btn.addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+  });
+
+  setTimeout(() => {
+    try { input.focus({ preventScroll: true }); } catch (e) {}
+  }, 120);
+}
+
+function setStudentStatus(msg) {
+  const dot = document.getElementById('sDot');
+  const label = document.getElementById('sStatus');
+  if (!dot || !label) return;
+
+  dot.className = 'dot';
+  if (studentState.status === 'online') {
+    dot.classList.add('online');
+    label.textContent = '已连接课堂 · 可以提交';
+  } else if (studentState.status === 'connecting') {
+    dot.classList.add('connecting');
+    label.textContent = msg || '正在连接课堂…';
+  } else {
+    dot.classList.add('offline');
+    label.textContent = msg || '未连接';
+  }
+}
+
+function connectStudent(fullPeerId) {
+  studentState.roomId = fullPeerId;
+  studentState.status = 'connecting';
+  setStudentStatus();
+
+  if (studentState.peer && !studentState.peer.destroyed) {
+    try { studentState.peer.destroy(); } catch (e) {}
+  }
+  studentState.peer = null;
+  studentState.conn = null;
+
+  let peer;
+  try {
+    peer = new Peer(undefined, {
+      debug: 0,
+      config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] },
+    });
+  } catch (e) {
+    studentState.status = 'error';
+    setStudentStatus('无法建立连接，点击提交重试');
+    return;
+  }
+  studentState.peer = peer;
+
+  const fail = (msg) => {
+    if (studentState.status === 'online') return;
+    studentState.status = 'error';
+    setStudentStatus(msg);
+  };
+
+  peer.on('open', () => {
+    let conn;
+    try {
+      conn = peer.connect(fullPeerId, { reliable: true });
+    } catch (e) {
+      fail('连接失败，点击提交重试');
+      return;
+    }
+    studentState.conn = conn;
+
+    const connTimer = setTimeout(() => {
+      if (studentState.status !== 'online') fail('连接超时，点击提交重试');
+    }, 12000);
+
+    conn.on('open', () => {
+      clearTimeout(connTimer);
+      studentState.status = 'online';
+      setStudentStatus();
+      flushPending();
+    });
+
+    conn.on('close', () => {
+      if (studentState.status === 'online') {
+        studentState.status = 'error';
+        setStudentStatus('连接已断开，提交时自动重连');
+      }
+    });
+
+    conn.on('error', () => {});
+  });
+
+  peer.on('error', (err) => {
+    console.warn('[PeerJS student]', err);
+    if (err.type === 'peer-unavailable') {
+      fail('找不到课堂，请确认教师页面仍打开');
+    } else if (err.type === 'network' || err.type === 'server-error') {
+      fail('网络异常，点击提交重试');
+    } else {
+      fail('连接失败，点击提交重试');
+    }
+  });
+}
+
+function flushPending() {
+  if (!studentState.conn || !studentState.conn.open) return;
+  const list = studentState.pending.splice(0);
+  for (const text of list) {
+    try { studentState.conn.send({ type: 'answer', text }); } catch (e) {}
+  }
+  if (list.length) feedbackSubmitted();
+}
+
+function studentSubmit() {
+  const input = document.getElementById('sInput');
+  if (!input) return;
+  const text = normalize(input.value);
+  if (!text) {
+    toast('请输入答案');
+    input.focus();
+    return;
+  }
+
+  if (studentState.conn && studentState.conn.open) {
+    try { studentState.conn.send({ type: 'answer', text }); } catch (e) {}
+    input.value = '';
+    input.focus();
+    feedbackSubmitted();
+    return;
+  }
+
+  studentState.pending.push(text);
+  input.value = '';
+  input.focus();
+
+  if (studentState.status !== 'connecting') {
+    connectStudent(studentState.roomId);
+  }
+  const btn = document.getElementById('sSubmit');
+  if (btn) {
+    btn.textContent = '⏳ 等待连接…';
+    btn.classList.remove('ok');
+  }
+}
+
+function feedbackSubmitted() {
+  const btn = document.getElementById('sSubmit');
+  if (!btn) return;
+  btn.textContent = '✓ 已提交';
+  btn.classList.add('ok');
+  clearTimeout(feedbackSubmitted._t);
+  feedbackSubmitted._t = setTimeout(() => {
+    btn.textContent = '提交答案';
+    btn.classList.remove('ok');
+  }, 1300);
+}
+
+function renderStudentNoRoom() {
+  studentCard.innerHTML = `
+    <h2>请从教师提供的入口进入</h2>
+    <p class="desc">扫描教师投屏上的二维码，或点开教师分享的链接，即可直接作答。</p>
+    <button class="btn-ghost" id="btnCloseStudent">关闭</button>
+  `;
+  $('#btnCloseStudent').onclick = () => studentModal.classList.remove('open');
+}
+
+function autoJoinAsStudent(fullPeerId) {
+  studentModal.classList.add('open');
+  if (!fullPeerId) {
+    renderStudentNoRoom();
+    return;
+  }
+  renderStudentAnswer();
+  connectStudent(fullPeerId);
+}
+
+/* ================================================================
+ * 七、教师操作
+ * ================================================================ */
+function showTeacherQR() {
+  if (!state.myPeerId) { toast('请等待房间创建完成'); return; }
+
+  const joinUrl = `${location.origin}${location.pathname}?join=1&room=${encodeURIComponent(state.myPeerId)}`;
+
+  studentModal.classList.add('open');
+  studentCard.innerHTML = `
+    <h2>学生扫码加入</h2>
+    <p class="desc">学生扫码或点开链接后，无需任何等待即可直接输入答案。</p>
+    <div style="text-align:center;padding:16px 0;">
+      <div id="qrcode" style="display:inline-block;background:#fff;padding:12px;border-radius:10px;"></div>
+    </div>
+    <div class="field">
+      <label>或复制链接发送到班级群</label>
+      <input type="text" value="${escapeHtml(joinUrl)}" readonly onclick="this.select()">
+    </div>
+    <p class="desc" style="font-size:12px;">房间短号：<strong style="color:var(--accent);">${escapeHtml(state.roomId)}</strong>（仅供确认，请使用扫码或链接进入）</p>
+    <button class="btn-ghost" id="btnCloseQR">关闭</button>
+  `;
+  $('#btnCloseQR').onclick = () => studentModal.classList.remove('open');
+
+  loadQRCodeLib().then(() => {
+    const el = document.getElementById('qrcode');
+    if (el && window.QRCode) {
+      new QRCode(el, {
+        text: joinUrl,
+        width: 200,
+        height: 200,
+        colorDark: '#050810',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.M,
+      });
+    }
+  }).catch(() => {
+    const el = document.getElementById('qrcode');
+    if (el) el.innerHTML = '<p style="color:#8b949e;font-size:12px;padding:40px;">二维码加载失败，请使用下方链接</p>';
+  });
+}
+
+function loadQRCodeLib() {
+  return new Promise((resolve, reject) => {
+    if (window.QRCode) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js';
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+function exportAnswers() {
+  if (state.answers.length === 0) { toast('暂无答案可导出'); return; }
+
+  const lines = ['答案\t出现次数\t首次提交时间'];
+  const sorted = [...state.answers].sort((a, b) => b.count - a.count);
+  for (const a of sorted) {
+    lines.push(`${a.text}\t${a.count}\t${new Date(a.firstAt).toLocaleTimeString()}`);
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `课堂答案_${new Date().toLocaleDateString('zh-CN')}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('已导出');
+}
+
+function clearAll() {
+  if (state.answers.length === 0) return;
+  if (!confirm('确定清空所有答案吗？此操作不可撤销。')) return;
+  state.answers = [];
+  state.answerMap.clear();
+  cloudEl.innerHTML = '';
+  domMap.clear();
+  measureCache.clear();
+  emptyHint.classList.remove('hidden');
+  updateStats();
+  toast('已清空');
+}
+
+function recenter() {
+  if (state.answers.length === 0) return;
+  renderCloud();
+  toast('已重新布局');
+}
+
+function toggleSort() {
+  state.sortByHeat = !state.sortByHeat;
+  $('#btnSort').classList.toggle('active', state.sortByHeat);
+  renderCloud();
+  toast(state.sortByHeat ? '按热度优先布局' : '按出现顺序布局');
+}
+
+/* ================================================================
+ * 八、初始化
+ * ================================================================ */
+function bindCommonEvents() {
+  $('#btnStudent').onclick = () => {
+    if (!state.isTeacher || !state.myPeerId) {
+      toast('请等待房间创建完成');
+      return;
+    }
+    showTeacherQR();
+  };
+
+  $('#btnNewRoom').onclick = () => {
+    if (confirm('创建新房间将断开所有学生连接，确定继续？')) {
+      location.href = location.pathname;
+    }
+  };
+
+  $('#btnSort').onclick = toggleSort;
+  $('#btnRecenter').onclick = recenter;
+  $('#btnExport').onclick = exportAnswers;
+  $('#btnClear').onclick = clearAll;
+
+  studentModal.addEventListener('click', (e) => {
+    if (e.target === studentModal) studentModal.classList.remove('open');
+  });
+
+  window.addEventListener('resize', () => {
+    clearTimeout(state.resizeTimer);
+    state.resizeTimer = setTimeout(() => {
+      if (state.answers.length > 0) renderCloud();
+    }, 300);
+  });
+}
+
+async function init() {
+  bindCommonEvents();
+
+  const params = new URLSearchParams(location.search);
+
+  // —— 学生模式 ——
+  if (params.get('join') === '1') {
+    document.body.classList.add('student-mode');
+    autoJoinAsStudent(params.get('room') || '');
+    return;
+  }
+
+  // —— 教师模式 ——
+  initStarfield();
+
+  try {
+    await initTeacher();
+  } catch (e) {
+    statusDot.className = 'dot offline';
+    statusText.textContent = '房间创建失败';
+    toast('无法连接信令服务器，请检查网络后刷新', 4000);
+  }
+}
+
+init();
+</script>
+</body>
+</html>
